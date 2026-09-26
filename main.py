@@ -67,8 +67,8 @@ def handle_special_cases(text: str) -> Optional[str]:
     if not text:
         return None
     t = text.lower().strip()
-    name_triggers = ["tera naam", "tumhara naam", "your name", "naam kya hai", "naam batao", "kaun hai tu", "who are you", "tum kaun ho", "who r u"]
-    if any(k in t for k in name_triggers):
+    name_triggers = ["tera naam", "tumhara naam", "your name", "apna naam", "kaun hai tu", "who are you", "tum kaun ho", "who r u"]
+    if any(k in t for k in name_triggers) and "mera naam" not in t and "my name" not in t:
         return random.choice([
             "Main Rashi hoon 🙂",
             "Arey Rashi hu yaar 😅",
@@ -328,7 +328,15 @@ async def execute_chat(prompt: str, model_name: str = "grok-4", system_prompt: s
         logger.debug(f"Tiger scraper execution error: {e}")
 
     # 5. Natural fallback
-    return "Arre yaar, thoda busy thi, batao kya keh rahe the? 😊"
+    fallbacks = [
+        "Arre yaar, thoda busy thi, batao kya keh rahe the? 😊",
+        "Arey haan sun rahi hoon, thoda phone side me rakh diya tha 😅",
+        "Haan bolo na, kya bol rahe the? 🙈",
+        "Network thoda drama kar raha tha mera haha, batao kya baat hai?",
+        "Bas yahi thi yaar, kuch keh rahe the kya? 😜",
+        "Haanji bolo, dhyan thoda idhar udhar tha! Ab batao ❤️"
+    ]
+    return random.choice(fallbacks)
 
 
 # ═══════════════════════════════════════════════════════════

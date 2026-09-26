@@ -325,6 +325,24 @@ async def ask_endpoint(req: Request):
     return JSONResponse(content={"status": "success", "reply": reply}, media_type="application/json; charset=utf-8")
 
 
+@app.get("/debug")
+async def debug_endpoint():
+    out = {"time": time.time()}
+    try:
+        s_id, nonce = await session_mgr.get_valid_session(force_refresh=True)
+        out["session_id"] = s_id
+        out["nonce"] = nonce
+    except Exception as e:
+        out["session_error"] = str(e)
+
+    try:
+        rep = await session_mgr.generate_reply("hello", model_key="grok-4")
+        out["reply"] = rep
+    except Exception as e:
+        out["reply_error"] = str(e)
+    return out
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))

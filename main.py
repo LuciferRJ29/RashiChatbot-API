@@ -4,6 +4,7 @@ import uuid
 import json
 import random
 import asyncio
+import re
 import logging
 from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
@@ -328,61 +329,26 @@ async def ask_endpoint(req: Request):
 @app.get("/debug")
 async def debug_endpoint():
     out = {"time": time.time()}
-    client = httpx.AsyncClient(follow_redirects=True, timeout=10.0)
+    client = httpx.AsyncClient(follow_redirects=True, timeout=12.0)
     
-    # 1. Test free-ai-online with spoofed headers
-    try:
-        r1 = await client.post(
-            START_SESSION_URL,
-            json={},
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36",
-                "Origin": BASE_URL,
-                "X-Forwarded-For": f"103.{random.randint(10,200)}.{random.randint(10,200)}.{random.randint(10,200)}",
-                "X-Real-IP": f"103.{random.randint(10,200)}.{random.randint(10,200)}.{random.randint(10,200)}",
-            }
-        )
-        out["free_ai_online"] = {"code": r1.status_code, "text": r1.text[:100]}
-    except Exception as e:
-        out["free_ai_online"] = {"error": str(e)}
+    browser_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Sec-Ch-Ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Upgrade-Insecure-Requests": "1"
+    }
 
-    # 2. Test blackbox.ai (free, no login, ultra fast)
     try:
-        r2 = await client.post(
-            "https://www.blackbox.ai/api/chat",
-            json={
-                "messages": [{"role": "user", "content": "hi"}],
-                "id": str(uuid.uuid4()),
-                "previewToken": None,
-                "userId": None,
-                "codeModelMode": True,
-                "agentMode": {},
-                "trendingAgentMode": {},
-                "isMicMode": False,
-                "maxTokens": 100,
-                "playgroundMode": False,
-                "webSearchMode": False,
-                "userSelectedModel": None
-            },
-            headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
-        )
-        out["blackbox"] = {"code": r2.status_code, "text": r2.text[:100]}
+        r_get = await client.get("https://www.free-ai-online.com/grok-4-free/", headers=browser_headers)
+        out["get_page"] = {"code": r_get.status_code, "server": r_get.headers.get("server"), "title": re.search(r"<title>(.*?)</title>", r_get.text).group(1) if re.search(r"<title>(.*?)</title>", r_get.text) else r_get.text[:100]}
     except Exception as e:
-        out["blackbox"] = {"error": str(e)}
-
-    # 3. Test pollinations gen.pollinations.ai / v1
-    try:
-        r3 = await client.get("https://text.pollinations.ai/hello?model=mistral")
-        out["pollinations_mistral"] = {"code": r3.status_code, "text": r3.text[:100]}
-    except Exception as e:
-        out["pollinations_mistral"] = {"error": str(e)}
-
-    # 4. Test airforce / free ai
-    try:
-        r4 = await client.get("https://api.airforce/chat/completions")
-        out["airforce"] = {"code": r4.status_code, "text": r4.text[:100]}
-    except Exception as e:
-        out["airforce"] = {"error": str(e)}
+        out["get_page"] = {"error": str(e)}
 
     await client.aclose()
     return out

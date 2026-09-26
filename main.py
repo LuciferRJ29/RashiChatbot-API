@@ -61,11 +61,14 @@ def get_http_client() -> httpx.AsyncClient:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.client = get_http_client()
-    logger.info("Initializing free-ai-online session on startup...")
-    try:
-        await scraper_instance.get_valid_session(app.state.client)
-    except Exception as e:
-        logger.warning("Could not pre-fetch session on startup (will retry on first query): %s", e)
+    import os
+    if os.getenv("GROQ_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("OPENROUTER_API_KEY"):
+        logger.info("✅ Multi-Provider AI ready (Groq/Gemini key active)!")
+    else:
+        try:
+            await scraper_instance.get_valid_session(app.state.client)
+        except Exception:
+            logger.info("ℹ️ Running in API mode. Set GROQ_API_KEY for ultra-fast LLaMA responses.")
     yield
     if hasattr(app.state, "client") and app.state.client and not app.state.client.is_closed:
         await app.state.client.aclose()

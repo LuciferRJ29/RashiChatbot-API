@@ -328,18 +328,14 @@ async def ask_endpoint(req: Request):
 @app.get("/debug")
 async def debug_endpoint():
     out = {"time": time.time()}
+    client = session_mgr.get_client()
     try:
-        s_id, nonce = await session_mgr.get_valid_session(force_refresh=True)
-        out["session_id"] = s_id
-        out["nonce"] = nonce
+        r = await client.post(START_SESSION_URL, json={}, headers=DEFAULT_HEADERS)
+        out["status_code"] = r.status_code
+        out["text"] = r.text[:300]
+        out["headers"] = dict(r.headers)
     except Exception as e:
-        out["session_error"] = str(e)
-
-    try:
-        rep = await session_mgr.generate_reply("hello", model_key="grok-4")
-        out["reply"] = rep
-    except Exception as e:
-        out["reply_error"] = str(e)
+        out["error"] = str(e)
     return out
 
 

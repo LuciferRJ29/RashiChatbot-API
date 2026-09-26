@@ -4,12 +4,11 @@ import uuid
 import json
 import random
 import asyncio
-import re
 import logging
 from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
 
-import httpx
+from curl_cffi.requests import AsyncSession
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,13 +19,6 @@ logger = logging.getLogger("rashi_api")
 BASE_URL = "https://www.free-ai-online.com"
 START_SESSION_URL = f"{BASE_URL}/wp-json/mwai/v1/start_session"
 SUBMIT_CHAT_URL = f"{BASE_URL}/wp-json/mwai-ui/v1/chats/submit"
-
-DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Origin": BASE_URL,
-    "Referer": f"{BASE_URL}/grok-4-free/",
-    "Accept": "application/json, text/plain, */*",
-}
 
 RASHI_SYSTEM_PROMPT = (
     "Tu Rashi hai — ek real 20 saal ki sweet, smart aur thodi nautanki Indian college girl jo Telegram pe dosto se baat kar rahi hai.\n"
@@ -91,16 +83,12 @@ class TigerSessionManager:
         self.session_id: Optional[str] = None
         self.nonce: Optional[str] = None
         self.last_init_time: float = 0.0
-        self.client: Optional[httpx.AsyncClient] = None
+        self.session: Optional[AsyncSession] = None
 
-    def get_client(self) -> httpx.AsyncClient:
-        if self.client is None or self.client.is_closed:
-            self.client = httpx.AsyncClient(
-                follow_redirects=True,
-                timeout=httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0),
-                limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
-            )
-        return self.client
+    def get_session(self) -> AsyncSession:
+        if self.session is None:
+            self.session = AsyncSession(impersonate="chrome124", timeout=20.0)
+        return self.session
 
     async def get_valid_session(self, force_refresh: bool = False) -> tuple[Optional[str], Optional[str]]:
         now = time.time()
@@ -111,13 +99,10 @@ class TigerSessionManager:
             if not force_refresh and self.session_id and self.nonce and (time.time() - self.last_init_time < 600):
                 return self.session_id, self.nonce
 
-            client = self.get_client()
-            headers = DEFAULT_HEADERS.copy()
-            headers["Content-Type"] = "application/json"
-
+            session = self.get_session()
             try:
-                logger.info("Initializing fresh Tiger session from free-ai-online.com...")
-                resp = await client.post(START_SESSION_URL, json={}, headers=headers)
+                logger.info("Initializing Tiger session using Chrome TLS impersonation...")
+                resp = await session.post(START_SESSION_URL, json={})
                 if resp.status_code == 200:
                     data = resp.json()
                     if data.get("success") or "sessionId" in data:
@@ -126,7 +111,7 @@ class TigerSessionManager:
                         self.last_init_time = time.time()
                         logger.info(f"Tiger session ready: {self.session_id[:8]}..., nonce: {self.nonce}")
                         return self.session_id, self.nonce
-                logger.warning(f"Start session failed with code: {resp.status_code}")
+                logger.warning(f"Start session failed: {resp.status_code} - {resp.text[:100]}")
             except Exception as e:
                 logger.error(f"Error initializing Tiger session: {e}")
 
@@ -134,7 +119,7 @@ class TigerSessionManager:
 
     async def generate_reply(self, prompt: str, system_prompt: str = "", model_key: str = "grok-4", history: List[Dict] = None) -> Optional[str]:
         cfg = MODEL_CONFIGS.get(model_key, MODEL_CONFIGS["grok-4"])
-        client = self.get_client()
+        session = self.get_session()
 
         session_id, nonce = await self.get_valid_session(force_refresh=False)
         if not (session_id and nonce):
@@ -161,14 +146,16 @@ class TigerSessionManager:
             "stream": False
         }
 
-        req_headers = DEFAULT_HEADERS.copy()
-        req_headers["Referer"] = cfg["referer"]
-        req_headers["Content-Type"] = "application/json"
-        req_headers["X-WP-Nonce"] = nonce
+        req_headers = {
+            "Origin": BASE_URL,
+            "Referer": cfg["referer"],
+            "Content-Type": "application/json",
+            "X-WP-Nonce": nonce
+        }
 
         for attempt in range(2):
             try:
-                resp = await client.post(SUBMIT_CHAT_URL, json=payload, headers=req_headers)
+                resp = await session.post(SUBMIT_CHAT_URL, json=payload, headers=req_headers)
                 if resp.status_code == 200:
                     d = resp.json()
                     if d.get("success") and d.get("reply"):
@@ -200,13 +187,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Lifespan pre-warm notice: {e}")
     yield
-    client = session_mgr.client
-    if client and not client.is_closed:
-        await client.aclose()
+    session = session_mgr.session
+    if session:
+        await session.close()
 
 app = FastAPI(
     title="RashiChatbot AI API Backend",
-    version="2.6.0",
+    version="2.7.0",
     lifespan=lifespan
 )
 
@@ -225,7 +212,7 @@ async def execute_chat(prompt: str, model_name: str = "grok-4", system_prompt: s
     if quick:
         return quick
 
-    # 2. Main ultra-fast scraper (1.5s - Grok-4)
+    # 2. Main ultra-fast scraper (Grok-4 via Chrome TLS impersonation)
     model_key = "grok-4"
     if model_name:
         ml = model_name.lower().strip()
@@ -277,8 +264,8 @@ async def root_get(
             content={
                 "service": "RashiChatbot AI API Backend",
                 "status": "online",
-                "version": "2.6.0",
-                "engine": "Tiger Protect Grok-4 (sub-2s latency)",
+                "version": "2.7.0",
+                "engine": "Tiger Protect Grok-4 (Chrome TLS impersonation)",
                 "usage": "GET /?query=hello or POST / with {'prompt': 'hello'}"
             },
             media_type="application/json; charset=utf-8"
@@ -326,31 +313,19 @@ async def ask_endpoint(req: Request):
     return JSONResponse(content={"status": "success", "reply": reply}, media_type="application/json; charset=utf-8")
 
 
+# ── GET /debug ──
 @app.get("/debug")
 async def debug_endpoint():
     out = {"time": time.time()}
-    client = httpx.AsyncClient(follow_redirects=True, timeout=12.0)
-    
-    browser_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Sec-Ch-Ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"Windows"',
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Upgrade-Insecure-Requests": "1"
-    }
-
     try:
-        r_get = await client.get("https://www.free-ai-online.com/grok-4-free/", headers=browser_headers)
-        out["get_page"] = {"code": r_get.status_code, "server": r_get.headers.get("server"), "title": re.search(r"<title>(.*?)</title>", r_get.text).group(1) if re.search(r"<title>(.*?)</title>", r_get.text) else r_get.text[:100]}
+        s_id, nonce = await session_mgr.get_valid_session(force_refresh=True)
+        out["session_id"] = s_id
+        out["nonce"] = nonce
+        if s_id and nonce:
+            rep = await session_mgr.generate_reply("kya kar rahi ho?", model_key="grok-4")
+            out["reply"] = rep
     except Exception as e:
-        out["get_page"] = {"error": str(e)}
-
-    await client.aclose()
+        out["error"] = str(e)
     return out
 
 

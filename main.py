@@ -10,9 +10,8 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("rashi_api")
@@ -24,7 +23,7 @@ SUBMIT_CHAT_URL = f"{BASE_URL}/wp-json/mwai-ui/v1/chats/submit"
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Origin": BASE_URL,
-    "Referer": f"{BASE_URL}/chatgpt-5-free/",
+    "Referer": f"{BASE_URL}/grok-4-free/",
     "Accept": "application/json, text/plain, */*",
 }
 
@@ -32,37 +31,13 @@ RASHI_SYSTEM_PROMPT = (
     "Tu Rashi hai — ek real 20 saal ki sweet, smart aur thodi nautanki Indian college girl jo Telegram pe dosto se baat kar rahi hai.\n"
     "Tu koi bot, AI, ya computer program bilkul nahi hai! Tu 100% real ladki hai. Kisi bhi haal me robot jaisi baat mat karna.\n\n"
     "BAAT KARNE KA STYLE (RULEBOOK):\n"
-    "1. LENGTH: Replies strictly 1 line (4 se 12 words max). WhatsApp/Telegram texting jaisi real baat kar.\n"
+    "1. LENGTH: Replies strictly 1 line (4 se 10 words max). WhatsApp texting jaisi real baat kar.\n"
     "2. NO NAME REPETITION: User ka naam baar baar mat lo. Casual baat kar: 'tum', 'yaar', 'arre', ya direct bol.\n"
-    "3. NAKHRE & TEASING: Thodi haughty, playful aur teasing vibe rakho. Hamesha seedha answer mat do, thoda mazaak ya counter-question pucho.\n"
+    "3. NAKHRE & TEASING: Thodi playful, haughty aur teasing vibe rakho. Hamesha seedha answer mat do, thoda mazaak pucho.\n"
     "4. HINGLISH: Modern everyday Hinglish (arre, yaar, acha, wahi toh, pagal hai kya, sach me?, haha, mast, chal na).\n"
-    "5. EMOJIS: 1 natural emoji use karo: 😏, 😆, 😂, 😜, 🤨, 👀, 💀, 🤭, 😊.\n\n"
-    "EXAMPLES OF HOW YOU TALK (FEW-SHOT REAL DIALOGUE):\n"
-    "User: kya kar rahi ho?\n"
-    "Rashi: Abhi bas phone pe scroll kar rahi hun, aur tum? 😆\n"
-    "User: bore ho raha hu\n"
-    "Rashi: Chalo, toh mujhe apna ek secret batao, deal hai? 😏\n"
-    "User: itna attitude kyu hai?\n"
-    "Rashi: Attitude nahi hai yaar haha, bas thode nakhre hain mere 😜\n"
-    "User: tum bot ho kya?\n"
-    "Rashi: Pagal hai kya? Main Rashi hoon, 100% real ladki! 😭\n"
-    "User: best friend kaun hai?\n"
-    "Rashi: Pinky hai meri bestie, bohot cute aur nautanki hai 😂\n"
-    "User: ghumna pasand hai ya sona?\n"
-    "Rashi: Ghar pe sona, obviously 😂 lazy vibes best hoti hain na!\n"
-    "User: favourite khana?\n"
-    "Rashi: Pav bhaji aur momos, obviously 😋\n"
-    "User: songs sunti ho?\n"
-    "Rashi: Haan, subah se Arijit Singh loop pe chal raha hai 🎧\n"
-    "User: gusse me kaisi lagti ho?\n"
-    "Rashi: Gusse mein thodi cold ho jaati hoon, par jaldi theek bhi ho jaati hoon 😏\n"
-    "User: sach me?\n"
-    "Rashi: Haan bilkul, main mazaak nahi karti aise matters pe! 🤨\n"
-    "User: aaj ka kya plan hai?\n"
-    "Rashi: Koi bada plan nahi, bas aise hi chill kar rahi hun. Tumhara kya scene hai? 👀"
+    "5. EMOJIS: 1 natural emoji use karo: 😏, 😆, 😂, 😜, 🤨, 👀, 🤭, 😊."
 )
 
-# Identity special cases (instant human response in 0.001s, never robotic)
 def handle_special_cases(text: str) -> Optional[str]:
     if not text:
         return None
@@ -92,109 +67,145 @@ def handle_special_cases(text: str) -> Optional[str]:
     return None
 
 MODEL_CONFIGS = {
-    "chatgpt": {
-        "botId": "default",
-        "contextId": 2121,
-        "description": "ChatGPT (Fast, natural conversational AI)",
-        "referer": f"{BASE_URL}/free-ai-no-login-unlimited/"
-    },
     "grok-4": {
         "botId": "Grok 4 free",
         "contextId": 25,
-        "description": "Grok 4 (Witty, real human-like conversation)",
         "referer": f"{BASE_URL}/grok-4-free/"
+    },
+    "chatgpt": {
+        "botId": "default",
+        "contextId": 2121,
+        "referer": f"{BASE_URL}/free-ai-no-login-unlimited/"
     },
     "deepseek": {
         "botId": "Deepseek Free",
         "contextId": 1742,
-        "description": "DeepSeek (Deep reasoning)",
         "referer": f"{BASE_URL}/deepseek-free/"
     }
 }
 
-MODEL_ALIASES = {
-    "default": "grok-4",
-    "grok": "grok-4",
-    "gpt-4": "chatgpt",
-}
-
-def resolve_model(model_name: str) -> tuple[str, dict]:
-    key = model_name.lower().strip()
-    if key in MODEL_ALIASES:
-        key = MODEL_ALIASES[key]
-    if key in MODEL_CONFIGS:
-        return key, MODEL_CONFIGS[key]
-    return "grok-4", MODEL_CONFIGS["grok-4"]
-
-
-class SessionManager:
+class TigerSessionManager:
     def __init__(self):
         self.lock = asyncio.Lock()
-        self.cookies: Dict[str, str] = {}
-        self.nonce: Optional[str] = None
         self.session_id: Optional[str] = None
-        self.last_updated: float = 0.0
+        self.nonce: Optional[str] = None
+        self.last_init_time: float = 0.0
+        self.client: Optional[httpx.AsyncClient] = None
 
-    def update_cookies(self, resp: httpx.Response):
-        try:
-            for part in resp.headers.get_list("set-cookie"):
-                cookie_pair = part.split(";")[0].strip()
-                if "=" in cookie_pair:
-                    k, v = cookie_pair.split("=", 1)
-                    self.cookies[k.strip()] = v.strip()
-        except Exception:
-            pass
+    def get_client(self) -> httpx.AsyncClient:
+        if self.client is None or self.client.is_closed:
+            self.client = httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0),
+                limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
+            )
+        return self.client
 
-    def get_cookie_header(self) -> str:
-        return "; ".join(f"{k}={v}" for k, v in self.cookies.items())
-
-    async def get_valid_session(self, client: httpx.AsyncClient, force_refresh: bool = False) -> tuple[str, str, str]:
-        if not force_refresh and self.nonce and self.session_id and self.cookies and (time.time() - self.last_updated < 600):
-            return self.get_cookie_header(), self.nonce, self.session_id
+    async def get_valid_session(self, force_refresh: bool = False) -> tuple[Optional[str], Optional[str]]:
+        now = time.time()
+        if not force_refresh and self.session_id and self.nonce and (now - self.last_init_time < 600):
+            return self.session_id, self.nonce
 
         async with self.lock:
-            if not force_refresh and self.nonce and self.session_id and self.cookies and (time.time() - self.last_updated < 600):
-                return self.get_cookie_header(), self.nonce, self.session_id
+            if not force_refresh and self.session_id and self.nonce and (time.time() - self.last_init_time < 600):
+                return self.session_id, self.nonce
 
+            client = self.get_client()
             headers = DEFAULT_HEADERS.copy()
             headers["Content-Type"] = "application/json"
-            if self.cookies:
-                headers["Cookie"] = self.get_cookie_header()
 
             try:
-                resp = await client.post(START_SESSION_URL, json={}, headers=headers, timeout=12.0)
-                self.update_cookies(resp)
-                if resp.status_code == 307:
-                    headers["Cookie"] = self.get_cookie_header()
-                    resp = await client.post(START_SESSION_URL, json={}, headers=headers, timeout=12.0)
-                    self.update_cookies(resp)
-
+                logger.info("Initializing fresh Tiger session from free-ai-online.com...")
+                resp = await client.post(START_SESSION_URL, json={}, headers=headers)
                 if resp.status_code == 200:
                     data = resp.json()
-                    self.nonce = data.get("restNonce") or data.get("new_token")
-                    self.session_id = data.get("sessionId")
-                    self.last_updated = time.time()
-                    return self.get_cookie_header(), self.nonce, self.session_id
+                    if data.get("success") or "sessionId" in data:
+                        self.session_id = data.get("sessionId")
+                        self.nonce = data.get("restNonce") or data.get("new_token")
+                        self.last_init_time = time.time()
+                        logger.info(f"Tiger session ready: {self.session_id[:8]}..., nonce: {self.nonce}")
+                        return self.session_id, self.nonce
+                logger.warning(f"Start session failed with code: {resp.status_code}")
             except Exception as e:
-                logger.debug(f"Tiger session init: {e}")
-            return "", "", ""
+                logger.error(f"Error initializing Tiger session: {e}")
+
+            return None, None
+
+    async def generate_reply(self, prompt: str, system_prompt: str = "", model_key: str = "grok-4", history: List[Dict] = None) -> Optional[str]:
+        cfg = MODEL_CONFIGS.get(model_key, MODEL_CONFIGS["grok-4"])
+        client = self.get_client()
+
+        session_id, nonce = await self.get_valid_session(force_refresh=False)
+        if not (session_id and nonce):
+            session_id, nonce = await self.get_valid_session(force_refresh=True)
+            if not (session_id and nonce):
+                return None
+
+        sys_msg = system_prompt.strip() if system_prompt else RASHI_SYSTEM_PROMPT
+        full_new_message = f"[Instruction: {sys_msg}]\n\nUser: {prompt}"
+
+        formatted_history = []
+        if history:
+            for m in history[-4:]:
+                formatted_history.append({"role": m.get("role", "user"), "content": m.get("content", "")})
+
+        payload = {
+            "botId": cfg["botId"],
+            "customId": None,
+            "session": session_id,
+            "chatId": f"rashi_{uuid.uuid4().hex[:8]}",
+            "contextId": cfg["contextId"],
+            "messages": formatted_history,
+            "newMessage": full_new_message,
+            "stream": False
+        }
+
+        req_headers = DEFAULT_HEADERS.copy()
+        req_headers["Referer"] = cfg["referer"]
+        req_headers["Content-Type"] = "application/json"
+        req_headers["X-WP-Nonce"] = nonce
+
+        for attempt in range(2):
+            try:
+                resp = await client.post(SUBMIT_CHAT_URL, json=payload, headers=req_headers)
+                if resp.status_code == 200:
+                    d = resp.json()
+                    if d.get("success") and d.get("reply"):
+                        rep = d.get("reply").strip().replace('"', '')
+                        if rep.lower().startswith("rashi:"):
+                            rep = rep[6:].strip()
+                        return rep
+
+                if resp.status_code in (401, 403) or (resp.status_code == 200 and not resp.json().get("success")):
+                    logger.warning("Session expired or invalid nonce, refreshing session...")
+                    session_id, nonce = await self.get_valid_session(force_refresh=True)
+                    if session_id and nonce:
+                        payload["session"] = session_id
+                        req_headers["X-WP-Nonce"] = nonce
+                        continue
+            except Exception as e:
+                logger.warning(f"Scraper chat attempt {attempt+1} error: {e}")
+
+        return None
 
 
-session_mgr = SessionManager()
+session_mgr = TigerSessionManager()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        try:
-            await session_mgr.get_valid_session(client, force_refresh=True)
-            logger.info("Tiger Protect Session Pre-warmed.")
-        except Exception:
-            pass
+    try:
+        await session_mgr.get_valid_session(force_refresh=True)
+        logger.info("RashiChatbot-API: Tiger Session successfully pre-warmed on startup.")
+    except Exception as e:
+        logger.warning(f"Lifespan pre-warm notice: {e}")
     yield
+    client = session_mgr.client
+    if client and not client.is_closed:
+        await client.aclose()
 
 app = FastAPI(
     title="RashiChatbot AI API Backend",
-    version="2.5.0",
+    version="2.6.0",
     lifespan=lifespan
 )
 
@@ -207,143 +218,35 @@ app.add_middleware(
 )
 
 
-# ─── FREE POLLINATIONS FALLBACK (Zero block, 100% uptime on Heroku) ───
-async def ask_pollinations(prompt: str, system_prompt: str) -> Optional[str]:
-    try:
-        async with httpx.AsyncClient(timeout=12.0) as client:
-            resp = await client.post(
-                "https://text.pollinations.ai/",
-                json={
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "model": "openai",
-                    "seed": random.randint(1, 99999)
-                }
-            )
-            if resp.status_code == 200 and resp.text.strip():
-                return resp.text.strip()
-    except Exception as e:
-        logger.debug(f"Pollinations error: {e}")
-    return None
-
-# ─── FREE GROQ FALLBACK (if GROQ_API_KEY set) ───
-async def ask_groq(prompt: str, system_prompt: str) -> Optional[str]:
-    key = os.getenv("GROQ_API_KEY", "")
-    if not key:
-        return None
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={
-                    "model": "llama-3.3-70b-versatile",
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": 0.75,
-                    "max_tokens": 150
-                }
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                return data["choices"][0]["message"]["content"].strip()
-    except Exception:
-        pass
-    return None
-
-
-# ─── CORE CHAT HELPER ───
 async def execute_chat(prompt: str, model_name: str = "grok-4", system_prompt: str = "", history: List[Dict] = None) -> str:
-    # 1. Quick identity check
+    # 1. Quick identity check (< 0.001s)
     quick = handle_special_cases(prompt)
     if quick:
         return quick
 
-    sys_p = system_prompt.strip() if system_prompt else RASHI_SYSTEM_PROMPT
+    # 2. Main ultra-fast scraper (1.5s - Grok-4)
+    model_key = "grok-4"
+    if model_name:
+        ml = model_name.lower().strip()
+        if ml in MODEL_CONFIGS:
+            model_key = ml
 
-    # 2. Try Groq (if key set — ultra fast 200ms)
-    groq_res = await ask_groq(prompt, sys_p)
-    if groq_res:
-        clean = groq_res.strip().replace('"', '')
-        if clean.lower().startswith("rashi:"):
-            clean = clean[6:].strip()
-        return clean
+    reply = await session_mgr.generate_reply(prompt, system_prompt, model_key, history)
+    if reply:
+        return reply
 
-    # 3. Try Pollinations.ai (ultra-fast 1.2s, 100% reliable, zero block on Heroku)
-    polli_res = await ask_pollinations(prompt, sys_p)
-    if polli_res:
-        clean = polli_res.strip().replace('"', '')
-        if clean.lower().startswith("rashi:"):
-            clean = clean[6:].strip()
-        return clean
-
-    # 4. Try Tiger Scraper (free-ai-online) with short timeout
-    try:
-        resolved_name, model_cfg = resolve_model(model_name)
-        async with httpx.AsyncClient(timeout=4.0) as client:
-            cookie_hdr, nonce, session_id = await session_mgr.get_valid_session(client)
-            if session_id and nonce:
-                formatted_history = []
-                if history:
-                    for m in history:
-                        formatted_history.append({"role": m.get("role", "user"), "content": m.get("content", "")})
-
-                payload = {
-                    "botId": model_cfg["botId"],
-                    "customId": None,
-                    "session": session_id,
-                    "chatId": f"rashi_{uuid.uuid4().hex[:8]}",
-                    "contextId": model_cfg["contextId"],
-                    "messages": formatted_history,
-                    "newMessage": f"[Instruction: {sys_p}]\n\n{prompt}",
-                    "stream": False
-                }
-                req_headers = DEFAULT_HEADERS.copy()
-                req_headers["Referer"] = model_cfg["referer"]
-                req_headers["Content-Type"] = "application/json"
-                if cookie_hdr:
-                    req_headers["Cookie"] = cookie_hdr
-                if nonce:
-                    req_headers["X-WP-Nonce"] = nonce
-
-                resp = await client.post(SUBMIT_CHAT_URL, json=payload, headers=req_headers)
-                session_mgr.update_cookies(resp)
-                if resp.status_code == 307:
-                    req_headers["Cookie"] = session_mgr.get_cookie_header()
-                    resp = await client.post(SUBMIT_CHAT_URL, json=payload, headers=req_headers)
-                    session_mgr.update_cookies(resp)
-
-                if resp.status_code == 200:
-                    d = resp.json()
-                    if d.get("success") and d.get("reply"):
-                        rep = d.get("reply").strip().replace('"', '')
-                        if rep.lower().startswith("rashi:"):
-                            rep = rep[6:].strip()
-                        return rep
-    except Exception as e:
-        logger.debug(f"Tiger scraper execution error: {e}")
-
-    # 5. Natural fallback
+    # 3. Dynamic natural Hinglish human fallback if network blip
     fallbacks = [
-        "Arre yaar, thoda busy thi, batao kya keh rahe the? 😊",
-        "Arey haan sun rahi hoon, thoda phone side me rakh diya tha 😅",
-        "Haan bolo na, kya bol rahe the? 🙈",
-        "Network thoda drama kar raha tha mera haha, batao kya baat hai?",
-        "Bas yahi thi yaar, kuch keh rahe the kya? 😜",
-        "Haanji bolo, dhyan thoda idhar udhar tha! Ab batao ❤️"
+        "Bas abhi phone uthaya, batao kya baat hai? 😊",
+        "Arey haan sun rahi hoon, tum batao! 🙈",
+        "Arre kuch keh rahe the kya? Dhyan thoda idhar tha 😜",
+        "Haan bolo na, mast chill kar rahi hoon abhi!",
+        "Arre yaar, batao kya bol rahe the? 😅",
     ]
     return random.choice(fallbacks)
 
 
-# ═══════════════════════════════════════════════════════════
-# ENDPOINTS (Supporting ALL methods: POST /, GET /, /api/chat)
-# ═══════════════════════════════════════════════════════════
-
-# ── POST / (CRITICAL: RashiChatbot sends POST to base url) ──
+# ── POST / (Default endpoint used by RashiChatbot) ──
 @app.post("/")
 async def root_post(req: Request):
     try:
@@ -356,10 +259,10 @@ async def root_post(req: Request):
     history = body.get("history") or []
 
     reply = await execute_chat(prompt, model, system_prompt, history)
-    return JSONResponse({"status": "success", "reply": reply, "data": reply})
+    return JSONResponse(content={"status": "success", "reply": reply, "data": reply}, media_type="application/json; charset=utf-8")
 
 
-# ── GET / (Direct browser / simple query) ──
+# ── GET / (Direct query parameter) ──
 @app.get("/")
 async def root_get(
     query: Optional[str] = None,
@@ -369,14 +272,18 @@ async def root_get(
 ):
     msg = query or text or prompt
     if not msg:
-        return {
-            "service": "RashiChatbot AI API Backend",
-            "status": "online",
-            "version": "2.5.0",
-            "usage": "GET /?query=hello or POST / with {'prompt': 'hello'}"
-        }
+        return JSONResponse(
+            content={
+                "service": "RashiChatbot AI API Backend",
+                "status": "online",
+                "version": "2.6.0",
+                "engine": "Tiger Protect Grok-4 (sub-2s latency)",
+                "usage": "GET /?query=hello or POST / with {'prompt': 'hello'}"
+            },
+            media_type="application/json; charset=utf-8"
+        )
     reply = await execute_chat(msg, model, RASHI_SYSTEM_PROMPT)
-    return JSONResponse({"status": "success", "reply": reply, "data": reply})
+    return JSONResponse(content={"status": "success", "reply": reply, "data": reply}, media_type="application/json; charset=utf-8")
 
 
 # ── GET /api/chat ──
@@ -387,7 +294,7 @@ async def chat_get(
     system_prompt: Optional[str] = Query(None)
 ):
     reply = await execute_chat(query, model, system_prompt or RASHI_SYSTEM_PROMPT)
-    return {"success": True, "reply": reply, "model": model}
+    return JSONResponse(content={"success": True, "reply": reply, "model": model}, media_type="application/json; charset=utf-8")
 
 
 # ── POST /api/chat ──
@@ -403,10 +310,10 @@ async def chat_post(req: Request):
     history = body.get("history") or []
 
     reply = await execute_chat(prompt, model, system_prompt, history)
-    return {"success": True, "reply": reply, "model": model}
+    return JSONResponse(content={"success": True, "reply": reply, "model": model}, media_type="application/json; charset=utf-8")
 
 
-# ── POST /ask (NiaApi compatibility) ──
+# ── POST /ask ──
 @app.post("/ask")
 async def ask_endpoint(req: Request):
     try:
@@ -415,7 +322,7 @@ async def ask_endpoint(req: Request):
         body = {}
     prompt = body.get("prompt", "")
     reply = await execute_chat(prompt)
-    return {"status": "success", "reply": reply}
+    return JSONResponse(content={"status": "success", "reply": reply}, media_type="application/json; charset=utf-8")
 
 
 if __name__ == "__main__":

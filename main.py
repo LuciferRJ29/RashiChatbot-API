@@ -316,16 +316,21 @@ async def ask_endpoint(req: Request):
 # ── GET /debug ──
 @app.get("/debug")
 async def debug_endpoint():
-    out = {"time": time.time()}
+    out = {
+        "time": time.time(),
+        "has_curl_cffi": bool(AsyncSession),
+    }
     try:
-        s_id, nonce = await session_mgr.get_valid_session(force_refresh=True)
-        out["session_id"] = s_id
-        out["nonce"] = nonce
-        if s_id and nonce:
-            rep = await session_mgr.generate_reply("kya kar rahi ho?", model_key="grok-4")
-            out["reply"] = rep
+        session = session_mgr.get_session()
+        out["session_type"] = str(type(session))
+        resp = await session.post(START_SESSION_URL, json={})
+        out["status_code"] = resp.status_code
+        out["headers"] = dict(resp.headers)
+        out["text"] = resp.text[:500]
     except Exception as e:
+        import traceback
         out["error"] = str(e)
+        out["trace"] = traceback.format_exc()
     return out
 
 

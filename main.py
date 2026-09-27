@@ -88,18 +88,78 @@ MODEL_CONFIGS = {
     }
 }
 
-class TigerSessionManager:
+FALLBACK_PROXIES = [
+    "http://5.129.254.70:8888",
+    "http://43.99.60.244:8089",
+    "http://5.129.254.5:8888",
+    "socks5://188.134.76.189:10808",
+]
+
+class SmartProxyManager:
     def __init__(self):
+        self.proxies: List[str] = list(FALLBACK_PROXIES)
+        self.active_idx: int = 0
+        self.lock = asyncio.Lock()
+        self.last_discovery: float = 0.0
+
+    def get_current_proxy(self) -> Optional[str]:
+        if not self.proxies:
+            return None
+        return self.proxies[self.active_idx % len(self.proxies)]
+
+    def rotate(self):
+        if self.proxies:
+            self.active_idx = (self.active_idx + 1) % len(self.proxies)
+            logger.info(f"Proxy rotated to index {self.active_idx}: {self.proxies[self.active_idx]}")
+
+    async def auto_discover(self):
+        now = time.time()
+        if now - self.last_discovery < 1200:
+            return
+        self.last_discovery = now
+        try:
+            async with AsyncSession(impersonate="chrome124", timeout=8.0) as s:
+                r = await s.get("https://raw.githubusercontent.com/monosans/proxy-list/main/proxies.json")
+                if r.status_code == 200:
+                    raw_list = r.json()
+                    candidates = []
+                    for item in raw_list[:200]:
+                        proto = item.get("protocol")
+                        if proto in ("http", "socks5"):
+                            candidates.append(f"{proto}://{item.get('host')}:{item.get('port')}")
+                    
+                    sem = asyncio.Semaphore(15)
+                    verified = []
+                    async def test_p(p_url):
+                        async with sem:
+                            try:
+                                async with AsyncSession(impersonate="chrome124", proxy=p_url, timeout=3.5) as test_s:
+                                    res = await test_s.post(START_SESSION_URL, json={})
+                                    if res.status_code == 200 and "sessionId" in res.text:
+                                        verified.append(p_url)
+                            except Exception:
+                                pass
+                    await asyncio.gather(*(test_p(c) for c in candidates[:60]))
+                    if verified:
+                        logger.info(f"Discovered {len(verified)} fresh working proxies for Tiger Scraper!")
+                        for vp in verified:
+                            if vp not in self.proxies:
+                                self.proxies.insert(0, vp)
+                        self.proxies = self.proxies[:25]
+        except Exception as e:
+            logger.debug(f"Proxy discovery background notice: {e}")
+
+proxy_mgr = SmartProxyManager()
+
+class TigerSessionManager:
+    def __init__(self, p_mgr: SmartProxyManager):
+        self.proxy_mgr = p_mgr
         self.lock = asyncio.Lock()
         self.session_id: Optional[str] = None
         self.nonce: Optional[str] = None
         self.last_init_time: float = 0.0
-        self.session: Optional[AsyncSession] = None
-
-    def get_session(self) -> AsyncSession:
-        if self.session is None:
-            self.session = AsyncSession(impersonate="chrome124", timeout=20.0, curl_options=get_curl_resolve_opts())
-        return self.session
+        self.use_direct: Optional[bool] = None
+        self.current_proxy: Optional[str] = None
 
     async def get_valid_session(self, force_refresh: bool = False) -> tuple[Optional[str], Optional[str]]:
         now = time.time()
@@ -110,27 +170,59 @@ class TigerSessionManager:
             if not force_refresh and self.session_id and self.nonce and (time.time() - self.last_init_time < 600):
                 return self.session_id, self.nonce
 
-            session = self.get_session()
-            try:
-                logger.info("Initializing Tiger session using Chrome TLS impersonation...")
-                resp = await session.post(START_SESSION_URL, json={})
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if data.get("success") or "sessionId" in data:
+            # 1. Test direct connection first if not known to be blocked
+            if self.use_direct is not False:
+                try:
+                    s_direct = AsyncSession(impersonate="chrome124", timeout=6.0, curl_options=get_curl_resolve_opts())
+                    resp = await s_direct.post(START_SESSION_URL, json={})
+                    if resp.status_code == 200:
+                        data = resp.json()
                         self.session_id = data.get("sessionId")
                         self.nonce = data.get("restNonce") or data.get("new_token")
                         self.last_init_time = time.time()
-                        logger.info(f"Tiger session ready: {self.session_id[:8]}..., nonce: {self.nonce}")
+                        self.use_direct = True
+                        self.current_proxy = None
+                        logger.info("Tiger session initialized directly (no proxy required).")
                         return self.session_id, self.nonce
-                logger.warning(f"Start session failed: {resp.status_code} - {resp.text[:100]}")
-            except Exception as e:
-                logger.error(f"Error initializing Tiger session: {e}")
+                    elif resp.status_code in (403, 503):
+                        logger.info(f"Direct connection got {resp.status_code} (datacenter IP), switching to proxy pool.")
+                        self.use_direct = False
+                except Exception as e:
+                    logger.info(f"Direct connection failed ({e}), switching to proxy pool.")
+                    self.use_direct = False
+
+            # 2. Connect via proxy pool
+            for attempt in range(len(self.proxy_mgr.proxies)):
+                proxy = self.proxy_mgr.get_current_proxy()
+                if not proxy:
+                    break
+                try:
+                    s_proxy = AsyncSession(impersonate="chrome124", proxy=proxy, timeout=7.0)
+                    resp = await s_proxy.post(START_SESSION_URL, json={})
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        self.session_id = data.get("sessionId")
+                        self.nonce = data.get("restNonce") or data.get("new_token")
+                        self.last_init_time = time.time()
+                        self.current_proxy = proxy
+                        logger.info(f"Tiger session initialized via proxy: {proxy} (session: {self.session_id[:8]}..., nonce: {self.nonce})")
+                        return self.session_id, self.nonce
+                    else:
+                        logger.warning(f"Proxy {proxy} returned {resp.status_code}, rotating...")
+                        self.proxy_mgr.rotate()
+                except Exception as e:
+                    logger.debug(f"Proxy {proxy} error: {e}, rotating...")
+                    self.proxy_mgr.rotate()
 
             return None, None
 
+    def get_client(self, timeout: float = 12.0) -> AsyncSession:
+        if self.current_proxy:
+            return AsyncSession(impersonate="chrome124", proxy=self.current_proxy, timeout=timeout)
+        return AsyncSession(impersonate="chrome124", timeout=timeout, curl_options=get_curl_resolve_opts())
+
     async def generate_reply(self, prompt: str, system_prompt: str = "", model_key: str = "grok-4", history: List[Dict] = None) -> Optional[str]:
         cfg = MODEL_CONFIGS.get(model_key, MODEL_CONFIGS["grok-4"])
-        session = self.get_session()
 
         session_id, nonce = await self.get_valid_session(force_refresh=False)
         if not (session_id and nonce):
@@ -166,7 +258,8 @@ class TigerSessionManager:
 
         for attempt in range(2):
             try:
-                resp = await session.post(SUBMIT_CHAT_URL, json=payload, headers=req_headers)
+                s = self.get_client(timeout=12.0)
+                resp = await s.post(SUBMIT_CHAT_URL, json=payload, headers=req_headers)
                 if resp.status_code == 200:
                     d = resp.json()
                     if d.get("success") and d.get("reply"):
@@ -175,8 +268,10 @@ class TigerSessionManager:
                             rep = rep[6:].strip()
                         return rep
 
-                if resp.status_code in (401, 403) or (resp.status_code == 200 and not resp.json().get("success")):
-                    logger.warning("Session expired or invalid nonce, refreshing session...")
+                if resp.status_code in (401, 403, 503) or (resp.status_code == 200 and not resp.json().get("success")):
+                    logger.warning("Scraper session expired or proxy blocked, refreshing...")
+                    if self.current_proxy:
+                        self.proxy_mgr.rotate()
                     session_id, nonce = await self.get_valid_session(force_refresh=True)
                     if session_id and nonce:
                         payload["session"] = session_id
@@ -184,11 +279,14 @@ class TigerSessionManager:
                         continue
             except Exception as e:
                 logger.warning(f"Scraper chat attempt {attempt+1} error: {e}")
+                if self.current_proxy:
+                    self.proxy_mgr.rotate()
+                session_id, nonce = await self.get_valid_session(force_refresh=True)
 
         return None
 
 
-session_mgr = TigerSessionManager()
+session_mgr = TigerSessionManager(proxy_mgr)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -197,10 +295,11 @@ async def lifespan(app: FastAPI):
         logger.info("RashiChatbot-API: Tiger Session successfully pre-warmed on startup.")
     except Exception as e:
         logger.warning(f"Lifespan pre-warm notice: {e}")
+    
+    # Start background proxy auto-discovery
+    discovery_task = asyncio.create_task(proxy_mgr.auto_discover())
     yield
-    session = session_mgr.session
-    if session:
-        await session.close()
+    discovery_task.cancel()
 
 app = FastAPI(
     title="RashiChatbot AI API Backend",
@@ -330,14 +429,17 @@ async def debug_endpoint():
     out = {
         "time": time.time(),
         "has_curl_cffi": bool(AsyncSession),
+        "use_direct": session_mgr.use_direct,
+        "current_proxy": session_mgr.current_proxy,
+        "session_id": session_mgr.session_id,
+        "nonce": session_mgr.nonce,
+        "total_proxies": len(proxy_mgr.proxies),
+        "proxies": proxy_mgr.proxies[:5],
     }
     try:
-        session = session_mgr.get_session()
-        out["session_type"] = str(type(session))
-        resp = await session.post(START_SESSION_URL, json={})
-        out["status_code"] = resp.status_code
-        out["headers"] = dict(resp.headers)
-        out["text"] = resp.text[:500]
+        reply = await session_mgr.generate_reply("Oye Rashi, kya kar rahi ho?", model_key="grok-4")
+        out["test_reply"] = reply
+        out["status"] = "success" if reply else "failed"
     except Exception as e:
         import traceback
         out["error"] = str(e)

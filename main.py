@@ -8,6 +8,8 @@ import logging
 from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
 
+import socket
+from curl_cffi import curl
 from curl_cffi.requests import AsyncSession
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -19,6 +21,15 @@ logger = logging.getLogger("rashi_api")
 BASE_URL = "https://www.free-ai-online.com"
 START_SESSION_URL = f"{BASE_URL}/wp-json/mwai/v1/start_session"
 SUBMIT_CHAT_URL = f"{BASE_URL}/wp-json/mwai-ui/v1/chats/submit"
+
+def get_curl_resolve_opts() -> dict:
+    host1 = "www.free-ai-online.com"
+    host2 = "free-ai-online.com"
+    try:
+        ip = socket.gethostbyname(host1)
+    except Exception:
+        ip = "109.234.167.117"
+    return {curl.CurlOpt.RESOLVE: [f"{host1}:443:{ip}", f"{host2}:443:{ip}"]}
 
 RASHI_SYSTEM_PROMPT = (
     "Tu Rashi hai — ek real 20 saal ki sweet, smart aur thodi nautanki Indian college girl jo Telegram pe dosto se baat kar rahi hai.\n"
@@ -87,7 +98,7 @@ class TigerSessionManager:
 
     def get_session(self) -> AsyncSession:
         if self.session is None:
-            self.session = AsyncSession(impersonate="chrome124", timeout=20.0)
+            self.session = AsyncSession(impersonate="chrome124", timeout=20.0, curl_options=get_curl_resolve_opts())
         return self.session
 
     async def get_valid_session(self, force_refresh: bool = False) -> tuple[Optional[str], Optional[str]]:
